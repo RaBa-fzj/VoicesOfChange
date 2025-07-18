@@ -1,0 +1,131 @@
+# %%
+import sys
+import numpy as np
+from pathlib import Path
+from sklearn.model_selection import GroupKFold
+from sklearn.dummy import DummyRegressor
+from sklearn.metrics import mean_absolute_error
+
+
+# Set random seed for reproducibility
+SEED = 42
+np.random.seed(SEED)
+
+project_dir = Path().resolve().parents[1]
+sys.path.append(str(project_dir / "code/"))
+
+# Project-designed functions
+from lib.data_loading import (  # noqa
+    load_and_preprocess_data,
+    get_num_and_cat_ord_features,
+    get_feature_list,
+)
+from lib.ml import get_ml_pipeline  # noqa
+from lib.utils import ensure_dir  # noqa
+
+
+# %% ############################# Variables and data
+data_dir = project_dir / "data/"
+file_name = "Paper_PV0775_SDQ_merged_dataset_whole.xlsx"
+exp_name = "permutation_test_include_voice"
+
+save_dir = project_dir / "output" / (exp_name + "/")
+ensure_dir(save_dir)
+
+# Add an experiment name to add in the last part of the
+# saved files
+
+# include the voice features or not
+include_voice = True
+
+# Include the puberty for the "Robustnes" analysis
+# If true, several patients will be drop for the lack of data
+# and a smaller cohort is generated
+include_puberty = False
+
+# Define parameter grid for hyperparameter tuning
+param_grid = {
+    "selector__k": [5, 10, "all"],  # Number of features to select
+    "model__alpha": [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0],
+}
+# For Hyperparameter tuning
+n_inner_folds = 3
+# For outer loop
+n_outer_folds = 5
+#######################################################
+# %% Data loading
+#
+
+# Data is loaded and pre process
+X, y, groups, covariats = load_and_preprocess_data(
+    data_dir=data_dir,
+    file_name=file_name,
+    include_voice=include_voice,
+    include_puberty=include_puberty,
+)
+print(f"Number of features: {X.shape[1]}")
+print(f"Number of patients: {X.shape[0]}")
+print(f"Number of unique patients: {groups.nunique()}")
+
+# %%
+# Get features for preprocessing
+# Get features for preprocessing
+numerical_features, categorical_features, ordinal_features = (
+    get_num_and_cat_ord_features(
+        include_voice=include_voice, include_puberty=include_puberty
+    )
+)
+
+_, voice_features, _ = get_feature_list(
+    include_voice=include_voice, include_puberty=include_puberty
+)
+
+# Get the ML pipeline
+pipeline = get_ml_pipeline(
+    numerical_features=numerical_features,
+    categorical_features=categorical_features,
+    voice_features=voice_features,
+    covariats=covariats,
+    SEED=SEED,
+    ordinal_features=ordinal_features,
+)
+
+
+# Outer cross-validation with GroupKFold
+
+outer_mae = []
+outer_r2 = []
+
+dummy_mae = []
+dummy_r2 = []
+
+n_repeats = 20
+SEED = 42
+
+# Inner cross-validation for hyperparameter tuning
+inner_cv = GroupKFold(n_splits=3)
+
+model = DummyRegressor(strategy="mean")
+
+for repeat in range(n_repeats):
+    outer_cv = GroupKFold(n_splits=5, random_state=SEED + repeat, shuffle=True)
+
+    for fold_idx, (train_idx, test_idx) in enumerate(
+        outer_cv.split(X, y, groups=groups)
+    ):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        groups_train = groups.iloc[train_idx]
+        groups_test = groups.iloc[test_idx]
+
+        model.fit(X_train, y_train)
+
+        # Test (fold) error
+        y_pred = model.predict(X_test)
+        mae = mean_absolute_error(y_test, y_pred)
+        outer_mae.append(mae)
+
+
+print("Final dummy model metrics:")
+print(f"\nAveraged MAE: {np.mean(outer_mae):.3f}")
+# %%
